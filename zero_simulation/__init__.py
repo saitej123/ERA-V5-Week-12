@@ -5,6 +5,7 @@ ZeRO Parallelism Simulation Package.
 from .config import (
     HardwareProfile,
     HARDWARE_PROFILES,
+    HARDWARE_GENERATION_ORDER,
     ClusterConfig,
     ModelConfig,
     MODEL_PRESETS,
@@ -31,10 +32,12 @@ from .zero_engine import (
 from .memory_tracker import MemoryProfiler
 from .comm_profiler import CommunicationProfiler
 from .four_questions import FourQuestionsSettler
+from .demo import make_32_virtual_gpus, ping_ranks_on_cpu_threads, run_zero_demo, cyclic_batch
 
 __all__ = [
     "HardwareProfile",
     "HARDWARE_PROFILES",
+    "HARDWARE_GENERATION_ORDER",
     "ClusterConfig",
     "ModelConfig",
     "MODEL_PRESETS",
@@ -57,4 +60,8 @@ __all__ = [
     "MemoryProfiler",
     "CommunicationProfiler",
     "FourQuestionsSettler",
+    "make_32_virtual_gpus",
+    "ping_ranks_on_cpu_threads",
+    "run_zero_demo",
+    "cyclic_batch",
 ]

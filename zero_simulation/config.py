@@ -22,19 +22,21 @@ class HardwareProfile:
     cpu_dram_bandwidth_gbps: float = 300.0     # Host DDR5 RAM bandwidth (GB/s)
 
 
-# Predefined hardware profiles
+# Chronological order matters: Section 5 plots A100 → H100 → B200.
+HARDWARE_GENERATION_ORDER = ["A100_SXM4", "H100_SXM5", "B200_NVL72"]
+
 HARDWARE_PROFILES: Dict[str, HardwareProfile] = {
-    "B200_NVL72": HardwareProfile(
-        name="NVIDIA Blackwell B200 (NVLink Rack)",
-        hbm_capacity_gb=192.0,
-        bf16_tflops=2250.0,
-        fp8_tflops=4500.0,
-        intra_node_bandwidth_gbps=1800.0,  # NVLink 5 (1.8 TB/s)
-        inter_node_bandwidth_gbps=100.0,   # Quantum-X800 InfiniBand (800 Gbps = 100 GB/s)
-        pcie_bandwidth_gbps=128.0,
-        intra_node_latency_us=0.5,
-        inter_node_latency_us=3.0,
-        cpu_dram_bandwidth_gbps=400.0
+    "A100_SXM4": HardwareProfile(
+        name="NVIDIA Ampere A100 SXM4",
+        hbm_capacity_gb=80.0,
+        bf16_tflops=312.0,
+        fp8_tflops=312.0,                  # No native FP8 tensor cores
+        intra_node_bandwidth_gbps=600.0,   # NVLink 3 (600 GB/s)
+        inter_node_bandwidth_gbps=25.0,    # 200 Gbps HDR IB (25 GB/s)
+        pcie_bandwidth_gbps=32.0,
+        intra_node_latency_us=1.5,
+        inter_node_latency_us=8.0,
+        cpu_dram_bandwidth_gbps=200.0
     ),
     "H100_SXM5": HardwareProfile(
         name="NVIDIA Hopper H100 SXM5",
@@ -48,17 +50,17 @@ HARDWARE_PROFILES: Dict[str, HardwareProfile] = {
         inter_node_latency_us=5.0,
         cpu_dram_bandwidth_gbps=300.0
     ),
-    "A100_SXM4": HardwareProfile(
-        name="NVIDIA Ampere A100 SXM4",
-        hbm_capacity_gb=80.0,
-        bf16_tflops=312.0,
-        fp8_tflops=312.0,                  # No native FP8 tensor cores
-        intra_node_bandwidth_gbps=600.0,   # NVLink 3 (600 GB/s)
-        inter_node_bandwidth_gbps=25.0,    # 200 Gbps HDR IB (25 GB/s)
-        pcie_bandwidth_gbps=32.0,
-        intra_node_latency_us=1.5,
-        inter_node_latency_us=8.0,
-        cpu_dram_bandwidth_gbps=200.0
+    "B200_NVL72": HardwareProfile(
+        name="NVIDIA Blackwell B200 (NVLink Rack)",
+        hbm_capacity_gb=192.0,
+        bf16_tflops=2250.0,
+        fp8_tflops=4500.0,
+        intra_node_bandwidth_gbps=1800.0,  # NVLink 5 (1.8 TB/s)
+        inter_node_bandwidth_gbps=100.0,   # Quantum-X800 InfiniBand (800 Gbps = 100 GB/s)
+        pcie_bandwidth_gbps=128.0,
+        intra_node_latency_us=0.5,
+        inter_node_latency_us=3.0,
+        cpu_dram_bandwidth_gbps=400.0
     ),
     "VIRTUAL_CPU": HardwareProfile(
         name="Virtual 32-GPU Host Simulation",

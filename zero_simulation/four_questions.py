@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 from .config import (
     ModelConfig, HardwareProfile, ClusterConfig, ZeROConfig,
@@ -206,12 +207,22 @@ class FourQuestionsSettler:
             })
 
         df_topo = pd.DataFrame(records)
+        inter_share_4x8 = 100.0 * df_topo["Inter-Node Traffic (GB)"].iloc[0] / (
+            df_topo["Intra-Node Traffic (GB)"].iloc[0] + df_topo["Inter-Node Traffic (GB)"].iloc[0]
+        )
+        t0 = df_topo["Comm Time (ms)"].iloc[0]
+        t2 = df_topo["Comm Time (ms)"].iloc[2]
+        reduction = 100.0 * (1.0 - t2 / t0) if t0 > 0 else 0.0
+        bw_ratio = hw.intra_node_bandwidth_gbps / hw.inter_node_bandwidth_gbps
         verdict = (
-            "DECISION: Maximize the number of GPUs per NVLink node domain.\n"
-            "1. In a 4x8 topology, 77.4% of communication traffic crosses the slow 50 GB/s InfiniBand inter-node link.\n"
-            "2. In a 1x32 unified NVLink domain (e.g. Blackwell NVL), 100% of traffic stays on the 900-1800 GB/s fabric, "
-            "reducing communication time by ~82%.\n"
-            "3. For standard 4x8 deployments, enable 800Gbps NDR InfiniBand (1 NIC per GPU) and gradient bucketing to mask cross-node latency."
+            "DECISION: Keep as much ZeRO traffic as possible inside one NVLink domain.\n"
+            f"1. On 4 nodes x 8 GPUs, {inter_share_4x8:.1f}% of the ring volume crosses InfiniBand "
+            f"({hw.inter_node_bandwidth_gbps:.0f} GB/s), which is {bw_ratio:.0f}x slower than NVLink "
+            f"({hw.intra_node_bandwidth_gbps:.0f} GB/s).\n"
+            f"2. A single 32-GPU NVLink domain cuts communication time by {reduction:.0f}% "
+            f"({t0:.1f} ms → {t2:.1f} ms) because every byte stays on the fast fabric.\n"
+            "3. If the cluster is 4x8, use one NIC per GPU and keep gradient bucketing + overlap on, "
+            "so the slow hop is hidden behind backward compute."
         )
 
         return {"table": df_topo, "verdict": verdict}
@@ -229,48 +240,55 @@ class FourQuestionsSettler:
         Commits infrastructure to Blackwell (B200/GB200) hardware.
         """
         model_cfg = model_cfg or MODEL_PRESETS["demo_small"]
-        
-        # Run real training simulation steps with BF16 vs simulated MXFP8 (E4M3 with microscopic block scaling)
+
         torch.manual_seed(42)
         model_bf16 = DemoTransformerModel(model_cfg, dtype=torch.float32)
         model_mxfp8 = DemoTransformerModel(model_cfg, dtype=torch.float32)
         model_mxfp8.load_state_dict(model_bf16.state_dict())
-        
-        opt_bf16 = torch.optim.AdamW(model_bf16.parameters(), lr=1e-3)
-        opt_mxfp8 = torch.optim.AdamW(model_mxfp8.parameters(), lr=1e-3)
-        
+
+        opt_bf16 = torch.optim.AdamW(model_bf16.parameters(), lr=3e-3)
+        opt_mxfp8 = torch.optim.AdamW(model_mxfp8.parameters(), lr=3e-3)
+
+        # Same cyclic next-token batch every step so both runs can actually fit the map.
+        period = min(64, model_cfg.vocab_size)
+        pattern = torch.arange(model_cfg.seq_len) % period
+        x = pattern.unsqueeze(0).repeat(model_cfg.micro_batch_size, 1)
+        y = torch.roll(x, shifts=-1, dims=1)
+
         bf16_losses = []
         mxfp8_losses = []
-        
+
         for step in range(num_steps):
-            x = torch.randint(0, model_cfg.vocab_size, (model_cfg.micro_batch_size, model_cfg.seq_len))
-            y = torch.randint(0, model_cfg.vocab_size, (model_cfg.micro_batch_size, model_cfg.seq_len))
-            
-            # BF16 step
             opt_bf16.zero_grad()
             logits_bf16 = model_bf16(x)
-            loss_bf16 = nn.functional.cross_entropy(logits_bf16.view(-1, model_cfg.vocab_size), y.view(-1))
+            loss_bf16 = nn.functional.cross_entropy(
+                logits_bf16.view(-1, model_cfg.vocab_size), y.view(-1)
+            )
             loss_bf16.backward()
             opt_bf16.step()
             bf16_losses.append(loss_bf16.item())
-            
-            # MXFP8 step (simulating block quantization: 32 elements per scale factor)
+
             opt_mxfp8.zero_grad()
             logits_mxfp8 = model_mxfp8(x)
-            loss_mxfp8 = nn.functional.cross_entropy(logits_mxfp8.view(-1, model_cfg.vocab_size), y.view(-1))
+            loss_mxfp8 = nn.functional.cross_entropy(
+                logits_mxfp8.view(-1, model_cfg.vocab_size), y.view(-1)
+            )
             loss_mxfp8.backward()
-            
-            # Simulate MXFP8 micro-scaling on gradients
             with torch.no_grad():
                 for p in model_mxfp8.parameters():
-                    if p.grad is not None:
-                        # 32-element block scaling simulation
-                        g = p.grad.data
-                        scale = torch.max(torch.abs(g)) / 448.0 # FP8 E4M3 max range
-                        if scale > 1e-8:
-                            quantized_g = torch.clamp(torch.round(g / scale), -448.0, 448.0) * scale
-                            p.grad.data.copy_(quantized_g)
-                            
+                    if p.grad is None:
+                        continue
+                    g = p.grad.data.reshape(-1)
+                    block = 32
+                    pad = (block - g.numel() % block) % block
+                    if pad:
+                        g_pad = torch.cat([g, torch.zeros(pad, dtype=g.dtype)])
+                    else:
+                        g_pad = g
+                    blocks = g_pad.view(-1, block)
+                    scale = blocks.abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / 448.0
+                    q = torch.clamp(torch.round(blocks / scale), -448.0, 448.0) * scale
+                    p.grad.data.copy_(q.view(-1)[: g.numel()].view_as(p.grad.data))
             opt_mxfp8.step()
             mxfp8_losses.append(loss_mxfp8.item())
 
@@ -296,7 +314,7 @@ class FourQuestionsSettler:
                 "Comm Volume (GB)": prof_bf16["comm_volume_gb"],
                 "Total Step Time (ms)": prof_bf16["step_time_ms"],
                 "Throughput (Tokens/s)": prof_bf16["throughput_tokens_sec"],
-                "Final Loss (Step 10)": bf16_losses[-1],
+                "Final Loss": bf16_losses[-1],
                 "Hardware Required": "Hopper / Ampere / Blackwell"
             },
             {
@@ -307,16 +325,23 @@ class FourQuestionsSettler:
                 "Comm Volume (GB)": prof_mxfp8["comm_volume_gb"],
                 "Total Step Time (ms)": prof_mxfp8["step_time_ms"],
                 "Throughput (Tokens/s)": prof_mxfp8["throughput_tokens_sec"],
-                "Final Loss (Step 10)": mxfp8_losses[-1],
+                "Final Loss": mxfp8_losses[-1],
                 "Hardware Required": "NVIDIA Blackwell (B200/GB200)"
             }
         ])
 
+        speedup = prof_bf16["step_time_ms"] / prof_mxfp8["step_time_ms"]
+        loss_delta = abs(bf16_losses[-1] - mxfp8_losses[-1])
         verdict = (
-            "DECISION: Commit to MXFP8 arithmetic from day 1, provided Blackwell (B200/GB200) hardware is secured.\n"
-            f"1. Compute Speedup: 2.0x Tensor Core throughput (4500 TFLOPS vs 2250 TFLOPS).\n"
-            f"2. Communication Reduction: Halves parameter transmission volume ({prof_mxfp8['comm_volume_gb']:.2f} GB vs {prof_bf16['comm_volume_gb']:.2f} GB).\n"
-            f"3. Convergence Fidelity: Loss convergence delta is negligible ({abs(bf16_losses[-1] - mxfp8_losses[-1]):.5f}) due to 32-element micro-scaling block formats."
+            "DECISION: Commit to MXFP8 from day one if the cluster is Blackwell (B200/GB200).\n"
+            f"1. On B200, MXFP8 is {speedup:.2f}x faster per step "
+            f"({prof_mxfp8['step_time_ms']:.1f} ms vs {prof_bf16['step_time_ms']:.1f} ms) because "
+            f"Tensor Cores double ({hw_blackwell.fp8_tflops:.0f} vs {hw_blackwell.bf16_tflops:.0f} TFLOPS) "
+            "and the ZeRO payload is half as many bytes.\n"
+            f"2. Communication volume drops from {prof_bf16['comm_volume_gb']:.2f} GB to "
+            f"{prof_mxfp8['comm_volume_gb']:.2f} GB per GPU per step.\n"
+            f"3. On a cyclic next-token task, final loss stays aligned "
+            f"(BF16 {bf16_losses[-1]:.3f} vs MXFP8 {mxfp8_losses[-1]:.3f}, |Δ|={loss_delta:.4f})."
         )
 
         return {
@@ -347,60 +372,71 @@ class FourQuestionsSettler:
         # In ZeRO-2 @ 32 GPUs:
         mem_info = calculate_model_memory_breakdown(model, zero_stage=2, world_size=32, precision="bf16")
         total_gpu_mem = mem_info["total_gb"]
-        hbm_cap = hw.hbm_capacity_gb # 80 GB
-        
-        # GPU step time
+        hbm_cap = hw.hbm_capacity_gb
+        headroom_gb = hbm_cap - total_gpu_mem
+        headroom_pct = 100.0 * headroom_gb / hbm_cap
+
         step_gpu = CommunicationProfiler.profile_step_time(
             model, hw, ClusterConfig(world_size=32, gpus_per_node=8),
             zero_stage=2, precision="bf16", overlap=True
         )
-        
-        # ZeRO-Offload PCIe Transfer Time:
-        # Offload moves Gradients to CPU (2*Psi / 32 bytes) + moves Updated Params back to GPU (2*Psi / 32 bytes)
-        # Plus CPU Adam update time (CPU DRAM bandwidth ~300 GB/s)
+
+        # ZeRO-Offload: after ReduceScatter, the owner rank sends its gradient shard
+        # to CPU, runs Adam in DRAM, and copies the updated param shard back over PCIe.
         total_params = model.total_parameters
-        offload_grad_bytes = (total_params * 2) / 32
-        offload_param_bytes = (total_params * 2) / 32
-        pcie_bw = hw.pcie_bandwidth_gbps * 1e9 # 64 GB/s
-        
-        pcie_transfer_time_sec = (offload_grad_bytes + offload_param_bytes) / pcie_bw
-        # CPU Adam compute time: reading 4 bytes grad + 4 bytes param + 4 bytes m + 4 bytes v = 16 bytes per param
+        shard_grad_bytes = (total_params * 2) / 32
+        shard_param_bytes = (total_params * 2) / 32
+        pcie_bw = hw.pcie_bandwidth_gbps * 1e9
+        pcie_transfer_time_sec = (shard_grad_bytes + shard_param_bytes) / pcie_bw
         cpu_dram_bw = hw.cpu_dram_bandwidth_gbps * 1e9
         cpu_compute_sec = ((total_params / 32) * 16) / cpu_dram_bw
-        
         offload_overhead_ms = (pcie_transfer_time_sec + cpu_compute_sec) * 1000.0
         step_time_offload = step_gpu["step_time_ms"] + offload_overhead_ms
-        throughput_offload = (64 * model.seq_len) / (step_time_offload / 1000.0)
+        tokens = model.micro_batch_size * model.seq_len * 32
+        throughput_offload = tokens / (step_time_offload / 1000.0)
+        slowdown = step_time_offload / step_gpu["step_time_ms"]
+
+        comm_frac = step_gpu["comm_fraction"]
+        if total_gpu_mem > 0.95 * hbm_cap:
+            bottleneck = "memory-bound"
+        elif comm_frac >= 0.40:
+            bottleneck = "communication-bound"
+        else:
+            bottleneck = "compute-bound"
 
         df_offload = pd.DataFrame([
             {
                 "Execution Mode": "Pure GPU HBM (No Offload)",
                 "GPU Memory Used (GB)": total_gpu_mem,
                 "HBM Limit (GB)": hbm_cap,
-                "Memory Status": "Fits in HBM (Comfortable Headroom)",
+                "Headroom (GB)": headroom_gb,
+                "Memory Status": f"Fits ({headroom_pct:.0f}% headroom)",
                 "PCIe Overhead (ms)": 0.0,
                 "Step Time (ms)": step_gpu["step_time_ms"],
                 "Throughput (Tokens/s)": step_gpu["throughput_tokens_sec"],
-                "Slowdown Penalty": "1.0x (Optimal)"
+                "Slowdown Penalty": "1.00x",
             },
             {
                 "Execution Mode": "ZeRO-Offload (CPU DRAM)",
                 "GPU Memory Used (GB)": total_gpu_mem - mem_info["optimizer_gb"],
                 "HBM Limit (GB)": hbm_cap,
-                "Memory Status": "Unnecessary Memory Savings",
+                "Headroom (GB)": hbm_cap - (total_gpu_mem - mem_info["optimizer_gb"]),
+                "Memory Status": "Saves OS bytes we do not need",
                 "PCIe Overhead (ms)": offload_overhead_ms,
                 "Step Time (ms)": step_time_offload,
                 "Throughput (Tokens/s)": throughput_offload,
-                "Slowdown Penalty": f"{step_time_offload / step_gpu['step_time_ms']:.2f}x Slower"
-            }
+                "Slowdown Penalty": f"{slowdown:.2f}x",
+            },
         ])
 
         verdict = (
-            "DECISION: NO state should go to system memory.\n"
-            f"1. Memory Headroom: Under ZeRO-2 on 32 GPUs, total memory is {total_gpu_mem:.2f} GB out of {hbm_cap:.0f} GB HBM (38.8% headroom).\n"
-            "2. Bottleneck Classification: The run is compute/communication-bound, NOT memory-bound.\n"
-            f"3. PCIe Penalty: Offloading to CPU introduces a {offload_overhead_ms:.1f} ms PCIe Gen5 bottleneck, "
-            f"reducing training throughput by {step_time_offload / step_gpu['step_time_ms']:.2f}x."
+            "DECISION: Keep every state on GPU HBM. Do not offload to system memory.\n"
+            f"1. After choosing ZeRO-2 on 32 GPUs the footprint is {total_gpu_mem:.2f} GB of "
+            f"{hbm_cap:.0f} GB ({headroom_gb:.2f} GB / {headroom_pct:.0f}% free). The run is not memory-bound.\n"
+            f"2. Bottleneck once the stage is chosen: {bottleneck} "
+            f"(raw comm fraction {comm_frac*100:.1f}%, exposed comm {step_gpu['exposed_comm_fraction']*100:.1f}%).\n"
+            f"3. Offloading the Adam shard over PCIe Gen5 adds {offload_overhead_ms:.1f} ms "
+            f"({slowdown:.2f}x slower) for memory we already have on-device."
         )
 
-        return {"table": df_offload, "verdict": verdict}
+        return {"table": df_offload, "verdict": verdict, "bottleneck": bottleneck}

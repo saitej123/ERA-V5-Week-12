@@ -1,4 +1,9 @@
-# Python bytecode / caches (never commit)
+# Virtualenv — Cursor "Stage All" fails if these are not ignored
+.venv/
+venv/
+env/
+
+# Python bytecode / caches
 **/__pycache__/
 __pycache__/
 *.py[cod]
@@ -19,7 +24,7 @@ htmlcov/
 .tox/
 .nox/
 
-# Jupyter
+# Jupyter runtime (not the assignment notebook)
 .ipynb_checkpoints/
 .ipython/
 .jupyter/

@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 
-from .config import HardwareProfile, HARDWARE_PROFILES, ModelConfig, ClusterConfig, ZeROConfig
+from .config import HardwareProfile, HARDWARE_PROFILES, HARDWARE_GENERATION_ORDER, ModelConfig, ClusterConfig, ZeROConfig
 from .model import calculate_step_compute_flops
 
 
@@ -152,28 +152,58 @@ class CommunicationProfiler:
         causing Communication Fraction of step time to rise from ~20% to >55% if network doesn't match compute growth.
         """
         records = []
-        for hw_key, hw in HARDWARE_PROFILES.items():
-            if hw_key == "VIRTUAL_CPU":
-                continue
-            res = CommunicationProfiler.profile_step_time(
+        frozen_ib = HARDWARE_PROFILES["A100_SXM4"].inter_node_bandwidth_gbps
+        frozen_nvlink = HARDWARE_PROFILES["A100_SXM4"].intra_node_bandwidth_gbps
+        for hw_key in HARDWARE_GENERATION_ORDER:
+            hw = HARDWARE_PROFILES[hw_key]
+            native = CommunicationProfiler.profile_step_time(
                 model_cfg=model_cfg,
                 hw_profile=hw,
                 cluster_cfg=ClusterConfig(world_size=32, gpus_per_node=8),
                 zero_stage=zero_stage,
                 precision="bf16",
-                overlap=True
+                overlap=True,
             )
+            # Section 5: if the network does not keep up with Tensor Core growth,
+            # hold interconnect at A100 HDR levels while compute scales.
+            frozen_hw = HardwareProfile(
+                name=hw.name + " (frozen network)",
+                hbm_capacity_gb=hw.hbm_capacity_gb,
+                bf16_tflops=hw.bf16_tflops,
+                fp8_tflops=hw.fp8_tflops,
+                intra_node_bandwidth_gbps=frozen_nvlink,
+                inter_node_bandwidth_gbps=frozen_ib,
+                pcie_bandwidth_gbps=hw.pcie_bandwidth_gbps,
+                intra_node_latency_us=hw.intra_node_latency_us,
+                inter_node_latency_us=hw.inter_node_latency_us,
+                cpu_dram_bandwidth_gbps=hw.cpu_dram_bandwidth_gbps,
+            )
+            frozen = CommunicationProfiler.profile_step_time(
+                model_cfg=model_cfg,
+                hw_profile=frozen_hw,
+                cluster_cfg=ClusterConfig(world_size=32, gpus_per_node=8),
+                zero_stage=zero_stage,
+                precision="bf16",
+                overlap=True,
+            )
+            short = {
+                "A100_SXM4": "Ampere A100",
+                "H100_SXM5": "Hopper H100",
+                "B200_NVL72": "Blackwell B200",
+            }[hw_key]
             records.append({
-                "Hardware Generation": hw.name,
+                "Hardware Key": hw_key,
+                "Hardware Generation": short,
                 "Compute Peak TFLOPS": hw.bf16_tflops,
                 "Intra-Node NVLink (GB/s)": hw.intra_node_bandwidth_gbps,
                 "Inter-Node IB (GB/s)": hw.inter_node_bandwidth_gbps,
-                "Compute Time (ms)": res["compute_time_ms"],
-                "Comm Time (ms)": res["comm_time_ms"],
-                "Exposed Comm (ms)": res["exposed_comm_ms"],
-                "Total Step Time (ms)": res["step_time_ms"],
-                "Raw Comm Fraction (%)": res["comm_fraction"] * 100,
-                "Exposed Comm Fraction (%)": res["exposed_comm_fraction"] * 100,
-                "Tokens / sec": res["throughput_tokens_sec"]
+                "Compute Time (ms)": native["compute_time_ms"],
+                "Comm Time (ms)": native["comm_time_ms"],
+                "Exposed Comm (ms)": native["exposed_comm_ms"],
+                "Total Step Time (ms)": native["step_time_ms"],
+                "Raw Comm Fraction (%)": native["comm_fraction"] * 100,
+                "Exposed Comm Fraction (%)": native["exposed_comm_fraction"] * 100,
+                "Frozen-Net Comm Fraction (%)": frozen["comm_fraction"] * 100,
+                "Tokens / sec": native["throughput_tokens_sec"],
             })
         return pd.DataFrame(records)

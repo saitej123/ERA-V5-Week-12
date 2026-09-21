@@ -121,12 +121,21 @@ class DemoTransformerModel(nn.Module):
         logits = self.lm_head(h)
         return logits
 
-    def get_layer_parameter_groups(self) -> List[Tuple[str, List[torch.nn.Parameter]]]:
-        """Group parameters layer by layer for ZeRO-3 layer-wise AllGather/ReduceScatter."""
-        groups = [("embed_tokens", list(self.embed_tokens.parameters()))]
-        for idx, layer in enumerate(self.layers):
-            groups.append((f"layer_{idx}", list(layer.parameters())))
-        groups.append(("final_norm_and_head", list(self.norm.parameters()) + list(self.lm_head.parameters())))
+    def get_layer_parameter_groups(self) -> List[Tuple[str, List[str]]]:
+        """Group parameter *names* layer by layer for ZeRO-2/3 bucketing.
+
+        Must match `named_parameters()` prefixes:
+        embed_tokens.*, layers.{idx}.*, norm.*, lm_head.*
+        """
+        groups: List[Tuple[str, List[str]]] = []
+        groups.append(("embed_tokens", [n for n, _ in self.named_parameters() if n.startswith("embed_tokens")]))
+        for idx in range(len(self.layers)):
+            prefix = f"layers.{idx}."
+            groups.append((f"layers.{idx}", [n for n, _ in self.named_parameters() if n.startswith(prefix)]))
+        groups.append((
+            "final_norm_and_head",
+            [n for n, _ in self.named_parameters() if n.startswith("norm") or n.startswith("lm_head")],
+        ))
         return groups
 
 
@@ -232,14 +241,16 @@ def calculate_model_memory_breakdown(
         )
         buffer_mem += max_layer_params * p_bytes
 
-    total_mem = param_mem + grad_mem + opt_mem + act_mem + buffer_mem
+    # Persistent CUDA / NCCL workspace (allocator slack, collective scratch)
+    workspace_mem = 2.0 * (1024 ** 3)
+    total_mem = param_mem + grad_mem + opt_mem + act_mem + buffer_mem + workspace_mem
 
     return {
         "params_gb": param_mem / (1024 ** 3),
         "grads_gb": grad_mem / (1024 ** 3),
         "optimizer_gb": opt_mem / (1024 ** 3),
         "activation_gb": act_mem / (1024 ** 3),
-        "buffer_gb": buffer_mem / (1024 ** 3),
+        "buffer_gb": (buffer_mem + workspace_mem) / (1024 ** 3),
         "total_gb": total_mem / (1024 ** 3),
         "params_bytes": param_mem,
         "grads_bytes": grad_mem,

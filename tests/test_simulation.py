@@ -24,6 +24,9 @@ from zero_simulation import (
     MemoryProfiler,
     CommunicationProfiler,
     FourQuestionsSettler,
+    make_32_virtual_gpus,
+    ping_ranks_on_cpu_threads,
+    run_zero_demo,
 )
 
 
@@ -135,14 +138,49 @@ def test_four_questions_settlement():
     # Question 2
     q2_res = FourQuestionsSettler.settle_question_2()
     assert len(q2_res["table"]) == 3
-    assert "Maximize the number of GPUs per NVLink node" in q2_res["verdict"]
+    assert "Keep as much ZeRO traffic" in q2_res["verdict"]
     
     # Question 3
-    q3_res = FourQuestionsSettler.settle_question_3(num_steps=3)
-    assert len(q3_res["bf16_losses"]) == 3
-    assert len(q3_res["mxfp8_losses"]) == 3
+    q3_res = FourQuestionsSettler.settle_question_3(num_steps=8)
+    assert len(q3_res["bf16_losses"]) == 8
+    assert len(q3_res["mxfp8_losses"]) == 8
+    assert q3_res["bf16_losses"][-1] < q3_res["bf16_losses"][0]
     assert "Commit to MXFP8" in q3_res["verdict"]
     
     # Question 4
     q4_res = FourQuestionsSettler.settle_question_4()
-    assert "NO state should go to system memory" in q4_res["verdict"]
+    assert "Do not offload" in q4_res["verdict"]
+
+
+def test_layer_group_names_match_named_parameters():
+    model = DemoTransformerModel(MODEL_PRESETS["demo_small"])
+    named = dict(model.named_parameters())
+    grouped = 0
+    for group_name, names in model.get_layer_parameter_groups():
+        assert names, group_name
+        for n in names:
+            assert n in named
+            grouped += 1
+    assert grouped == len(named)
+
+
+def test_section5_hardware_order_and_rising_fraction():
+    df = CommunicationProfiler.hardware_evolution_sweep(MODEL_PRESETS["llm_20b"], zero_stage=2)
+    assert list(df["Hardware Generation"]) == ["Ampere A100", "Hopper H100", "Blackwell B200"]
+    compute = list(df["Compute Time (ms)"])
+    assert compute[0] > compute[1] > compute[2]
+    frozen = list(df["Frozen-Net Comm Fraction (%)"])
+    assert frozen[2] > frozen[0]
+
+
+def test_32_virtual_gpus_and_zero123_demo():
+    cluster = make_32_virtual_gpus()
+    assert len(cluster.gpus) == 32
+    ping = ping_ranks_on_cpu_threads(cluster)
+    assert len(ping) == 32
+    out = run_zero_demo(n_steps=2)
+    assert set(out["logs"]) == {"ZeRO-1", "ZeRO-2", "ZeRO-3"}
+    for logs in out["logs"].values():
+        assert logs[-1]["loss"] > 0
+        assert logs[-1]["compute_time_ms"] > 0
+        assert logs[-1]["comm_time_ms"] > 0
