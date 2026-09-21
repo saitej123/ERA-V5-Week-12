@@ -1,10 +1,10 @@
-# Assignment: ZeRO-1 / ZeRO-2 / ZeRO-3 on 32 Virtual GPUs
+# ZeRO-1 / ZeRO-2 / ZeRO-3 on 32 Virtual GPUs
 
-**Submit this notebook:** [`ZeRO_Parallelism_Simulation.ipynb`](./ZeRO_Parallelism_Simulation.ipynb)
+**Notebook:** [`ZeRO_Parallelism_Simulation.ipynb`](./ZeRO_Parallelism_Simulation.ipynb)
 
-The ask is: 32 virtual GPUs (CPU threads), a demo model on top, simulate ZeRO-1 / ZeRO-2 / ZeRO-3, show how memory and computation change.
+32 virtual GPUs (CPU threads), a demo model on top, ZeRO-1 / ZeRO-2 / ZeRO-3, and how memory and computation change.
 
-| Ask | Status |
+| Topic | What you get |
 | --- | --- |
 | 32 virtual GPUs | 32 `VirtualGPU` ranks, 8 per node, each rank runs a real GEMM on a CPU thread |
 | Demo model | Small Transformer trained on that cluster |
@@ -69,7 +69,7 @@ ZeRO-2 is the cheap communication point (\(2\Psi\), overlap hides ReduceScatter)
 
 ## 32 virtual GPUs + live demo
 
-Each rank is a `VirtualGPU` with its own memory counters, node id (8 GPUs / node), and ring collectives (`AllReduce`, `ReduceScatter`, `AllGather`). A small Transformer actually steps on that cluster. The 20.33B numbers are analytic (FLOPs / peak TFLOPS × 50% MFU, plus ring time on NVLink vs InfiniBand) so the assignment’s **20B memory wall** is visible on a laptop.
+Each rank is a `VirtualGPU` with its own memory counters, node id (8 GPUs / node), and ring collectives (`AllReduce`, `ReduceScatter`, `AllGather`). A small Transformer actually steps on that cluster. The 20.33B numbers are analytic (FLOPs / peak TFLOPS × 50% MFU, plus ring time on NVLink vs InfiniBand) so the **20B memory wall** is visible on a laptop.
 
 ![Comm fraction logged from step 1](plots/comm_fraction_step_log.png)
 

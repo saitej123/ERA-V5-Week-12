@@ -24,7 +24,7 @@ htmlcov/
 .tox/
 .nox/
 
-# Jupyter runtime (not the assignment notebook)
+# Jupyter runtime (not the project notebook)
 .ipynb_checkpoints/
 .ipython/
 .jupyter/

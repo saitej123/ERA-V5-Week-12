@@ -1,4 +1,4 @@
-"""Generate the assignment notebook: 32 vGPUs, demo model, ZeRO-1/2/3, memory + compute."""
+"""Generate the notebook: 32 vGPUs, demo model, ZeRO-1/2/3, memory + compute."""
 
 import nbformat as nbf
 
@@ -20,9 +20,9 @@ def code(s):
     cells.append(nbf.v4.new_code_cell(s))
 
 
-md("""# Assignment: ZeRO-1 / ZeRO-2 / ZeRO-3 on 32 Virtual GPUs
+md("""# ZeRO-1 / ZeRO-2 / ZeRO-3 on 32 Virtual GPUs
 
-This notebook is the submission for:
+This notebook covers:
 
 > Create **32 virtual GPUs** (CPU threads or Colab GPU). Write a **demo model** that runs on top of them. Simulate **ZeRO-1, ZeRO-2, and ZeRO-3**. Show how **memory** and **computation** change.
 
@@ -240,7 +240,7 @@ print('Same FLOPs at every stage:', f'{flops:.3e}')
 print('ZeRO-3 communicates 1.5× ZeRO-1/2 because it AllGathers parameters in forward as well.')
 """)
 
-md("""## What this shows (assignment recap)
+md("""## What this shows
 
 1. **32 virtual GPUs** exist as ranks + CPU threads. A Colab GPU is optional; the demo runs on CPU.
 2. A **demo Transformer** forwards, backwards, and steps on that cluster.

@@ -19,7 +19,7 @@ class VirtualGPU:
         self.cluster_cfg = cluster_cfg
         self.hw_profile = hw_profile
         
-        # Node and topology assignment
+        # Node and topology mapping
         self.gpus_per_node = cluster_cfg.gpus_per_node
         self.node_id = rank // self.gpus_per_node
         self.local_rank = rank % self.gpus_per_node

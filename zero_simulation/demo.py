@@ -1,5 +1,5 @@
 """
-Assignment demo: 32 CPU-thread virtual GPUs + a small Transformer + ZeRO-1/2/3.
+Demo: 32 CPU-thread virtual GPUs + a small Transformer + ZeRO-1/2/3.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed

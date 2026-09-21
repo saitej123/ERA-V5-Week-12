@@ -120,7 +120,7 @@ def plot_memory_scaling_sweep(model_cfg, output_dir="plots"):
 
 
 def plot_memory_and_compute_changes(model_cfg, output_dir="plots"):
-    """Assignment ask: show how memory AND computation/communication change across stages."""
+    """Show how memory AND computation/communication change across ZeRO stages."""
     hw = HARDWARE_PROFILES["H100_SXM5"]
     cluster = ClusterConfig(world_size=32, gpus_per_node=8)
     mem = MemoryProfiler.evaluate_stages_for_model(model_cfg, world_size=32)

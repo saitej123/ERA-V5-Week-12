@@ -39,7 +39,7 @@ def test_virtual_gpu_cluster_initialization():
     assert len(cluster.gpus) == 32
     assert cluster.cluster_cfg.num_nodes == 4
     
-    # Check node assignments
+    # Check which node each rank belongs to
     assert cluster.gpus[0].node_id == 0
     assert cluster.gpus[7].node_id == 0
     assert cluster.gpus[8].node_id == 1
